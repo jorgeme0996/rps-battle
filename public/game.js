@@ -252,6 +252,12 @@ class BootScene extends Phaser.Scene {
       g.lineStyle(2, 0x4ade80);
       g.strokeRoundedRect(0, 0, 160, 48, 12);
     });
+    this.bake('btn_red', 160, 48, g => {
+      g.fillStyle(0xdc2626);
+      g.fillRoundedRect(0, 0, 160, 48, 12);
+      g.lineStyle(2, 0xf87171);
+      g.strokeRoundedRect(0, 0, 160, 48, 12);
+    });
   }
 
   makeHpBar() {
@@ -313,14 +319,21 @@ class MenuScene extends Phaser.Scene {
     }
 
     // Play button
-    const playBtn = this.add.image(W / 2, 420, 'btn_blue').setInteractive();
-    this.add.text(W / 2, 420, 'JUGAR', {
+    this.isConnecting = false;
+    this.playBtn = this.add.image(W / 2, 420, 'btn_blue').setInteractive();
+    this.playBtnText = this.add.text(W / 2, 420, 'JUGAR', {
       fontSize: '20px', fontStyle: 'bold', color: '#ffffff'
     }).setOrigin(0.5);
 
-    playBtn.on('pointerdown', () => this.startConnect());
-    playBtn.on('pointerover', () => this.tweens.add({ targets: playBtn, scaleX: 1.05, scaleY: 1.05, duration: 80 }));
-    playBtn.on('pointerout', () => this.tweens.add({ targets: playBtn, scaleX: 1, scaleY: 1, duration: 80 }));
+    this.playBtn.on('pointerdown', () => {
+      if (this.isConnecting) this.cancelConnect();
+      else this.startConnect();
+    });
+    this.playBtn.on('pointerover', () => {
+      if (!this.isConnecting)
+        this.tweens.add({ targets: this.playBtn, scaleX: 1.05, scaleY: 1.05, duration: 80 });
+    });
+    this.playBtn.on('pointerout', () => this.tweens.add({ targets: this.playBtn, scaleX: 1, scaleY: 1, duration: 80 }));
 
     // Status text
     this.statusText = this.add.text(W / 2, 490, '', {
@@ -337,6 +350,9 @@ class MenuScene extends Phaser.Scene {
     const inputEl = document.getElementById('nameInput');
     const name = (inputEl ? inputEl.value.trim() : '') || 'Jugador';
 
+    this.isConnecting = true;
+    this.playBtn.setTexture('btn_red');
+    this.playBtnText.setText('CANCELAR');
     this.statusText.setText('Conectando…');
 
     // Connect socket
@@ -365,6 +381,18 @@ class MenuScene extends Phaser.Scene {
     socket.on('connect_error', () => {
       this.statusText.setText('❌ Error de conexión');
     });
+  }
+
+  cancelConnect() {
+    if (socket) {
+      socket.disconnect();
+      socket = null;
+    }
+    if (this.dotTimer) { this.dotTimer.remove(); this.dotTimer = null; }
+    this.isConnecting = false;
+    this.playBtn.setTexture('btn_blue');
+    this.playBtnText.setText('JUGAR');
+    this.statusText.setText('');
   }
 
   dotAnim() {
