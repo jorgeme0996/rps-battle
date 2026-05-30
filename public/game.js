@@ -203,9 +203,9 @@ class BootScene extends Phaser.Scene {
       g.strokeRoundedRect(2, 2, 106, 66, 8);
     });
     this.bake('craft_slot_active', 110, 70, g => {
-      g.fillStyle(0x0f3460);
+      g.fillStyle(0x4a0000);
       g.fillRoundedRect(2, 2, 106, 66, 8);
-      g.lineStyle(2, 0x3b82f6);
+      g.lineStyle(2, 0xef4444);
       g.strokeRoundedRect(2, 2, 106, 66, 8);
     });
     this.bake('craft_slot_ready', 110, 70, g => {
@@ -303,6 +303,14 @@ class MenuScene extends Phaser.Scene {
                border-radius:10px;background:#1e293b;color:#f1f5f9;
                outline:none;text-align:center;" />`
     );
+
+    // Stop Phaser from eating pointer/touch events meant for the input
+    const inputEl = document.getElementById('nameInput');
+    if (inputEl) {
+      ['mousedown', 'touchstart', 'pointerdown'].forEach(evt =>
+        inputEl.addEventListener(evt, e => e.stopPropagation(), { passive: false })
+      );
+    }
 
     // Play button
     const playBtn = this.add.image(W / 2, 420, 'btn_blue').setInteractive();
