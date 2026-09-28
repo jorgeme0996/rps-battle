@@ -97,6 +97,26 @@ const store = {
 
 const hex = n => '#' + n.toString(16).padStart(6, '0');
 
+// Anonymous, per-device id used only for analytics
+const PLAYER_ID = (() => {
+  let id = store.get('rps_pid');
+  if (!id) {
+    id = window.crypto && crypto.randomUUID
+      ? crypto.randomUUID()
+      : Date.now().toString(36) + Math.random().toString(36).slice(2);
+    store.set('rps_pid', id);
+  }
+  return id;
+})();
+
+function track(event, props = {}) {
+  try {
+    const body = JSON.stringify({ event, playerId: PLAYER_ID, props });
+    if (navigator.sendBeacon) navigator.sendBeacon('/api/event', new Blob([body], { type: 'application/json' }));
+    else fetch('/api/event', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {});
+  } catch (e) { /* analytics must never break the game */ }
+}
+
 function buzz(ms) {
   try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) { /* unsupported */ }
 }
@@ -794,6 +814,7 @@ class MenuScene extends Phaser.Scene {
 
   init(data) {
     this.autoStart = !!(data && data.autoStart);
+    this.lastVsBot = !!(data && data.lastVsBot);
     this.notice = (data && data.notice) || '';
     this.isConnecting = false;
   }
@@ -814,7 +835,7 @@ class MenuScene extends Phaser.Scene {
 
     if (this.notice) toast(this, this.notice, H - 60, C.enemy);
     if (this.autoStart) this.time.delayedCall(250, () => this.startConnect());
-    else if (!store.get('rps_tutorial_seen')) this.time.delayedCall(900, () => this.showTutorial());
+    else if (!store.get('rps_tutorial_seen')) this.time.delayedCall(900, () => this.showTutorial(true));
   }
 
   update(time, delta) {
@@ -966,8 +987,9 @@ class MenuScene extends Phaser.Scene {
   }
 
   // ── Tutorial ──────────────────────────────────────────────────────────────
-  showTutorial() {
+  showTutorial(auto = false) {
     if (this.tutorial || this.isConnecting) return;
+    track('tutorial_open', { auto });
     store.set('rps_tutorial_seen', '1');
     this.nameInput.setVisible(false);
 
@@ -1041,7 +1063,9 @@ class MenuScene extends Phaser.Scene {
       delay: 400, loop: true,
       callback: () => {
         const secs = Math.floor((this.time.now - this.searchStart) / 1000);
-        this.searchClock.setText(`${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`);
+        const botIn = this.botAt ? Math.ceil((this.botAt - this.time.now) / 1000) : 0;
+        this.searchClock.setText(`${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`
+          + (botIn > 0 ? `  ·  si no hay rivales, bot en ${botIn} s` : ''));
         this.dots = ((this.dots || 0) + 1) % 4;
         this.searchStatus.setText(this.statusBase + '.'.repeat(this.dots));
       },
@@ -1062,10 +1086,17 @@ class MenuScene extends Phaser.Scene {
 
     socket.on('connect', () => {
       this.setStatus('Buscando rival');
-      socket.emit('join', { playerName: name });
+      socket.emit('join', {
+        playerName: name,
+        playerId: PLAYER_ID,
+        source: this.autoStart ? 'rematch' : 'menu',
+        lastVsBot: this.lastVsBot,
+      });
+      this.autoStart = false;
     });
 
-    socket.on('waiting', () => {
+    socket.on('waiting', (data) => {
+      this.botAt = data && data.botInMs ? this.time.now + data.botInMs : null;
       this.setStatus('Buscando rival');
     });
 
@@ -1076,6 +1107,7 @@ class MenuScene extends Phaser.Scene {
         myName: data.myName,
         opponentName: data.opponentName,
         roomId: data.roomId,
+        isBot: !!data.isBot,
       });
     });
 
@@ -1122,6 +1154,7 @@ class GameScene extends Phaser.Scene {
     this.myName       = data.myName       || 'Yo';
     this.opponentName = data.opponentName || 'Rival';
     this.roomId       = data.roomId;
+    this.vsBot        = !!data.isBot;
 
     this.myHp   = MAX_HP;
     this.oppHp  = MAX_HP;
@@ -1859,7 +1892,7 @@ class GameScene extends Phaser.Scene {
   buildIntro() {
     const o = this.add.container(0, 0).setDepth(50);
     const dim = this.add.rectangle(W / 2, H / 2, W, H, C.bgDeep, 0.8);
-    const opp = this.banner(this.opponentName, C.enemy, 'RIVAL').setPosition(W + 200, H / 2 - 120);
+    const opp = this.banner(this.opponentName, C.enemy, this.vsBot ? 'BOT' : 'RIVAL').setPosition(W + 200, H / 2 - 120);
     const me = this.banner(this.myName, C.me, 'TÚ').setPosition(-200, H / 2 + 80);
     const vs = D(this, W / 2, H / 2 - 20, 'VS', 88, C.goldHex, { strokeThickness: 12 }).setScale(0);
     this.cdText = D(this, W / 2, H / 2 - 20, '', 140, C.text, { strokeThickness: 16 }).setAlpha(0);
@@ -1967,6 +2000,7 @@ class GameScene extends Phaser.Scene {
         oppHp,
         myName: this.myName,
         oppName: this.opponentName,
+        vsBot: this.vsBot,
         stats: { ...this.stats, damage: MAX_HP - oppHp },
       }));
     });
@@ -1983,6 +2017,7 @@ class GameScene extends Phaser.Scene {
         oppHp: this.oppHp,
         myName: this.myName,
         oppName: this.opponentName,
+        vsBot: this.vsBot,
         disconnected: true,
         stats: { ...this.stats, damage: MAX_HP - this.oppHp },
       }));
@@ -2097,7 +2132,7 @@ class GameOverScene extends Phaser.Scene {
       if (socket) socket.disconnect();
       socket = null;
       roomId = null;
-      this.scene.start('Menu', { autoStart });
+      this.scene.start('Menu', { autoStart, lastVsBot: !!this.data2.vsBot });
     };
     const again = makeButton(this, W / 2, 640, 280, 68, 'REVANCHA', BTN.green, () => leave(true), 32);
     this.tweens.add({ targets: again, scale: 1.05, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.easeInOut', delay: 1200 });
@@ -2135,6 +2170,7 @@ class GameOverScene extends Phaser.Scene {
   }
 
   share(result, oppName) {
+    track('share_click', { result });
     const url = location.origin;
     const text = result === 'win'
       ? `¡Le gané a ${oppName} en RPS Battle! ⚔️ ¿Te atreves a retarme?`
@@ -2172,6 +2208,12 @@ const config = {
 
 // Wait for the web fonts so Phaser text doesn't render in a fallback font
 window.addEventListener('load', () => {
+  let ref = '';
+  try { ref = document.referrer ? new URL(document.referrer).hostname : ''; } catch (e) { /* bad referrer */ }
+  track('app_open', {
+    standalone: !!(window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true,
+    ref,
+  });
   const fonts = document.fonts
     ? Promise.all([
         document.fonts.load('40px "Lilita One"'),
