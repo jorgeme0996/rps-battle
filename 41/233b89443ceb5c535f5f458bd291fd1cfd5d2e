@@ -1,0 +1,23 @@
+public/support.html
+  s_022e0dff71fcf7::t_d7ad110e3311bd 20
+store/app-store.md
+  s_022e0dff71fcf7::t_d7ad110e3311bd 16,85
+public/privacy.html
+  s_022e0dff71fcf7::t_d7ad110e3311bd 55,72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "41233b89443ceb5c535f5f458bd291fd1cfd5d2e",
+  "prompts": {},
+  "sessions": {
+    "s_022e0dff71fcf7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e5e49-749d-4624-a7d9-e29839f4029f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "jorgeme0996 <jorgeme0996@gmail.com>"
+    }
+  }
+}
