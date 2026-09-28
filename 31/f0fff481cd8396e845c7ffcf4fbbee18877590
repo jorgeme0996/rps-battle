@@ -1,0 +1,26 @@
+public/game.js
+  s_022e0dff71fcf7::t_063b4d33daae27 100-119,817,838,990,992,1066-1068,1089-1095,1098-1099,1110,1157,1895,2003,2020,2135,2173,2211-2216
+bot.js
+  s_022e0dff71fcf7::t_4020ed08c0c37d 1-135,137,140-141,143,145,147-154
+  s_022e0dff71fcf7::t_93f365394ef43f 136,138-139,142,144,146
+analytics.js
+  s_022e0dff71fcf7::t_8d4f24e60ea464 1-135
+server.js
+  s_022e0dff71fcf7::t_6c8d3a80b8cf95 5-6,14-18,21-37,47-48,52-53,69-91,96,103-176,186-192,194-195,197-198,201,203-205,207-213,223,225,241,245,247,251-254,263,265
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "31f0fff481cd8396e845c7ffcf4fbbee18877590",
+  "prompts": {},
+  "sessions": {
+    "s_022e0dff71fcf7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "086e5e49-749d-4624-a7d9-e29839f4029f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "jorgeme0996 <jorgeme0996@gmail.com>"
+    }
+  }
+}
