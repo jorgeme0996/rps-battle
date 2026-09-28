@@ -1,12 +1,16 @@
 {
   "appId": "com.jorgeme0996.rpsbattle",
   "appName": "RPS Battle",
-  "webDir": "dist/ios-web",
+  "webDir": "dist/native-web",
   "backgroundColor": "#0c0a1f",
   "ios": {
     "contentInset": "never",
     "scrollEnabled": false,
     "backgroundColor": "#0c0a1f",
     "preferredContentMode": "mobile"
+  },
+  "android": {
+    "backgroundColor": "#0c0a1f",
+    "adjustMarginsForEdgeToEdge": "force"
   }
 }

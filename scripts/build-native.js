@@ -1,13 +1,15 @@
-// Builds the web bundle for the iOS app: dist/ios-web (then `npx cap sync ios`)
+// Builds the web bundle shared by the native apps (Capacitor webDir): dist/native-web
+// Then `npx cap sync ios` / `npx cap sync android` copies it into each project.
 // Everything is bundled locally (no CDNs) and the game connects to RPS_SERVER.
-//   RPS_SERVER=https://my-server.example npm run build:ios
+//   npm run build:ios      |  npm run build:android
+//   RPS_SERVER=https://my-server.example npm run build:android
 const fs = require('fs');
 const path = require('path');
 
 const SERVER = process.env.RPS_SERVER || 'https://rps-battle-production-7f46.up.railway.app';
 const root = path.join(__dirname, '..');
 const src = path.join(root, 'public');
-const out = path.join(root, 'dist', 'ios-web');
+const out = path.join(root, 'dist', 'native-web');
 const mod = p => path.join(root, 'node_modules', p);
 
 fs.rmSync(out, { recursive: true, force: true });
@@ -42,7 +44,9 @@ replace(/\s*<link rel="preconnect"[^>]*>/, '');
 replace(/\s*<link rel="preconnect"[^>]*>/, '');
 replace(/\s*<link href="https:\/\/fonts.googleapis.com[^>]*>/, '');
 replace('  <style>\n', `  <style>\n${fontCss}\n`);
-// Keep the game clear of the notch / Dynamic Island and the home indicator
+// Keep the game clear of the notch / Dynamic Island and the home indicator (iOS).
+// On Android the WebView itself is laid out between the system bars (see
+// capacitor.config.json android.adjustMarginsForEdgeToEdge), so these insets are 0 there.
 replace('    #game { width: 100%; height: 100%; }', [
   '    #game {',
   '      position: fixed; left: 0; right: 0;',

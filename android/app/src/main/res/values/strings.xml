@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">RPS Battle</string>
+    <string name="title_activity_main">RPS Battle</string>
+    <string name="package_name">com.jorgeme0996.rpsbattle</string>
+    <string name="custom_url_scheme">com.jorgeme0996.rpsbattle</string>
+</resources>
