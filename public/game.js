@@ -40,15 +40,69 @@ const NAMES = { rock: 'PIEDRA', paper: 'PAPEL', scissors: 'TIJERA' };
 // Debris colour of each item when it breaks
 const ITEM_TINT = { rock: 0xa8a29e, paper: 0xfff3d6, scissors: 0xc9d6e3 };
 
+// ── Screen layout ──────────────────────────────────────────────────────────
+// The canvas fills the whole screen at the device's pixel density. The game is
+// laid out in a 390×844 design area that is scaled to fit inside the safe area
+// (notch / home bar) and centred; backgrounds are drawn BLEED units beyond it so
+// there are never bars around the game. The battle field itself has the same
+// size on every device, which keeps cross-play matches in sync.
+const DPR = Math.min(window.devicePixelRatio || 1, 3);
+const BLEED = 1600;
+const MENU_PAD = 600;
+
+function safeInsets() {
+  const probe = document.createElement('div');
+  probe.style.cssText = 'position:fixed;left:0;top:0;visibility:hidden;pointer-events:none;'
+    + 'padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)';
+  document.body.appendChild(probe);
+  const cs = getComputedStyle(probe);
+  const v = k => parseFloat(cs[k]) || 0;
+  const insets = { top: v('paddingTop'), right: v('paddingRight'), bottom: v('paddingBottom'), left: v('paddingLeft') };
+  probe.remove();
+  return insets;
+}
+
+function computeLayout() {
+  const w = Math.max(1, window.innerWidth), h = Math.max(1, window.innerHeight);
+  const s = safeInsets();
+  const cw = Math.round(w * DPR), ch = Math.round(h * DPR);
+  const availW = Math.max(1, w - s.left - s.right) * DPR;
+  const availH = Math.max(1, h - s.top - s.bottom) * DPR;
+  const zoom = Math.min(availW / W, availH / H);
+  // Centre of the safe area in canvas px → world point shown at the canvas centre
+  const sx = (s.left + (w - s.left - s.right) / 2) * DPR;
+  const sy = (s.top + (h - s.top - s.bottom) / 2) * DPR;
+  return { cw, ch, zoom, cx: W / 2 + (cw / 2 - sx) / zoom, cy: H / 2 + (ch / 2 - sy) / zoom };
+}
+let LAYOUT = computeLayout();
+
+// Visible world rectangle (design area + whatever the screen shows around it)
+function visibleRect() {
+  const vw = LAYOUT.cw / LAYOUT.zoom, vh = LAYOUT.ch / LAYOUT.zoom;
+  return { x: LAYOUT.cx - vw / 2, y: LAYOUT.cy - vh / 2, w: vw, h: vh };
+}
+
+window.addEventListener('resize', () => requestAnimationFrame(relayout));
+
+// World → CSS pixels (for the HTML name input laid over the canvas)
+function worldToCss(x, y) {
+  return {
+    x: (LAYOUT.cw / 2 + (x - LAYOUT.cx) * LAYOUT.zoom) / DPR,
+    y: (LAYOUT.ch / 2 + (y - LAYOUT.cy) * LAYOUT.zoom) / DPR,
+    k: LAYOUT.zoom / DPR,
+  };
+}
+
+function relayout() {
+  LAYOUT = computeLayout();
+  if (!phaserGame) return;
+  phaserGame.scale.resize(LAYOUT.cw, LAYOUT.ch);
+  phaserGame.events.emit('layout');
+}
+
 // ── Render resolution ──────────────────────────────────────────────────────
-// The world is laid out in 390×844 units, but the canvas is rendered at RES×
-// that size and every camera is zoomed by RES, so shapes and text stay crisp
-// on retina screens. Canvas textures are drawn at RES too (see canvasTex).
-const RES = (() => {
-  const dpr = window.devicePixelRatio || 1;
-  const fit = Math.min(window.innerWidth / W, window.innerHeight / H);
-  return Phaser.Math.Clamp(Math.ceil(fit * dpr * 2) / 2, 1, 3);
-})();
+// Canvas textures and text are drawn at RES× so they stay crisp at this zoom.
+const RES = Phaser.Math.Clamp(Math.ceil(LAYOUT.zoom * 2) / 2, 1, 3);
 const INV = 1 / RES;
 
 // ── Theme ──────────────────────────────────────────────────────────────────
@@ -179,9 +233,20 @@ function setupNativeName() {
 }
 
 function setupCamera(scene) {
-  const cam = scene.cameras.main;
-  cam.setZoom(RES);
-  cam.centerOn(W / 2, H / 2);
+  const apply = () => {
+    const cam = scene.cameras.main;
+    cam.setSize(scene.scale.width, scene.scale.height);
+    cam.setZoom(LAYOUT.zoom);
+    cam.centerOn(LAYOUT.cx, LAYOUT.cy);
+  };
+  apply();
+  scene.game.events.on('layout', apply);
+  scene.events.once('shutdown', () => scene.game.events.off('layout', apply));
+}
+
+// Solid background that reaches every screen edge
+function bleedFill(scene, color, depth = -10) {
+  return scene.add.rectangle(W / 2, H / 2, W + BLEED * 2, H + BLEED * 2, color).setDepth(depth);
 }
 
 // Body text
@@ -279,8 +344,10 @@ function toast(scene, msg, y = H - 120, color = C.gold) {
 // Slowly drifting items behind menus
 function addFloaters(scene, n) {
   const list = [];
+  const v = visibleRect();
+  n = Math.round(n * Math.max(1, v.w / W));
   for (let i = 0; i < n; i++) {
-    const s = img(scene, Phaser.Math.Between(20, W - 20), Phaser.Math.Between(0, H),
+    const s = img(scene, Phaser.Math.Between(v.x + 20, v.x + v.w - 20), Phaser.Math.Between(v.y, v.y + v.h),
       TYPES[i % 3], Phaser.Math.Between(26, 54));
     s.setAlpha(0.08 + Math.random() * 0.08);
     s.rotation = Math.random() * Math.PI * 2;
@@ -295,7 +362,11 @@ function updateFloaters(list, dt) {
   list.forEach(s => {
     s.y -= s.vy * dt;
     s.rotation += s.vr * dt;
-    if (s.y < -40) { s.y = H + 40; s.x = Phaser.Math.Between(20, W - 20); }
+    if (s.y < Math.min(0, visibleRect().y) - 40) {
+      const v = visibleRect();
+      s.y = Math.max(H, v.y + v.h) + 40;
+      s.x = Phaser.Math.Between(v.x + 20, v.x + v.w - 20);
+    }
   });
 }
 
@@ -788,9 +859,22 @@ class BootScene extends Phaser.Scene {
       c.restore();
     });
 
+    // Same vertical gradient without lanes, stretched sideways beyond the field
+    canvasTex(this, 'field_side', 8, FIELD_H, (c, w, h) => {
+      const g = c.createLinearGradient(0, 0, 0, h);
+      g.addColorStop(0, '#3a1838');
+      g.addColorStop(0.42, '#1c1636');
+      g.addColorStop(0.58, '#15203a');
+      g.addColorStop(1, '#0f3036');
+      c.fillStyle = g;
+      c.fillRect(0, 0, w, h);
+    }, 1);
+
     const wall = (key, top, bottom, flip) => canvasTex(this, key, W, 34, (c, w) => {
       if (flip) { c.translate(0, 34); c.scale(1, -1); }
-      const pts = [[0, 0], [w, 0], [w, 30]];
+      // The outline runs 4px past both sides so no vertical edge is stroked:
+      // the walls are tiled side by side and must join without a seam.
+      const pts = [[-4, 0], [w + 4, 0], [w + 4, 30]];
       let x = w;
       while (x > 0) {
         const x1 = Math.max(0, x - 14);
@@ -803,6 +887,7 @@ class BootScene extends Phaser.Scene {
         pts.push([x2, 30]);
         x = x2;
       }
+      pts.push([-4, pts[pts.length - 1][1]]);
       c.beginPath();
       pts.forEach(([px, py], i) => (i ? c.lineTo(px, py) : c.moveTo(px, py)));
       c.closePath();
@@ -860,14 +945,17 @@ class BootScene extends Phaser.Scene {
   }
 
   makeScreens() {
-    canvasTex(this, 'menu_bg', W, H, (c, w, h) => {
-      const g = c.createRadialGradient(w / 2, h * 0.2, 20, w / 2, h * 0.45, h * 0.8);
+    // Extra MENU_PAD around the design area; the gradient ends in the solid
+    // edge colour before the texture edge, so it blends into bleedFill().
+    canvasTex(this, 'menu_bg', W + MENU_PAD * 2, H + MENU_PAD * 2, (c, w, h) => {
+      const ox = MENU_PAD, oy = MENU_PAD;
+      const g = c.createRadialGradient(ox + W / 2, oy + H * 0.2, 20, ox + W / 2, oy + H * 0.45, H * 0.8);
       g.addColorStop(0, '#2d2468');
       g.addColorStop(0.5, '#14112b');
       g.addColorStop(1, '#0c0a1f');
       c.fillStyle = g;
       c.fillRect(0, 0, w, h);
-    }, 1);
+    }, 0.5);
 
     canvasTex(this, 'rays', 320, 320, c => {
       const n = 14;
@@ -962,6 +1050,7 @@ class MenuScene extends Phaser.Scene {
 
   create() {
     setupCamera(this);
+    bleedFill(this, C.bgDeep);
     img(this, W / 2, H / 2, 'menu_bg');
     this.floaters = addFloaters(this, 12);
 
@@ -1095,19 +1184,16 @@ class MenuScene extends Phaser.Scene {
       setVisible: (on) => { inputEl.style.display = on ? 'block' : 'none'; },
     };
     const place = () => {
-      const r = this.game.canvas.getBoundingClientRect();
-      const k = r.width / W;
-      inputEl.style.left = `${r.left + (W / 2) * k}px`;
-      inputEl.style.top = `${r.top + 360 * k}px`;
-      inputEl.style.transform = `translate(-50%, -50%) scale(${k})`;
+      const p = worldToCss(W / 2, 360);
+      inputEl.style.left = `${p.x}px`;
+      inputEl.style.top = `${p.y}px`;
+      inputEl.style.transform = `translate(-50%, -50%) scale(${p.k})`;
     };
     place();
     this.nameInput.setVisible(true);
-    // Wait a frame so Phaser has refitted the canvas first
-    const onResize = () => requestAnimationFrame(place);
-    window.addEventListener('resize', onResize);
+    this.game.events.on('layout', place);
     this.events.once('shutdown', () => {
-      window.removeEventListener('resize', onResize);
+      this.game.events.off('layout', place);
       this.nameInput.setVisible(false);
       inputEl.onkeydown = null;
     });
@@ -1181,7 +1267,7 @@ class MenuScene extends Phaser.Scene {
     this.nameInput.setVisible(false);
 
     const o = this.add.container(0, 0).setDepth(100);
-    const dim = this.add.rectangle(W / 2, H / 2, W, H, 0x0c0a1f, 0.88).setInteractive();
+    const dim = this.add.rectangle(W / 2, H / 2, W + BLEED * 2, H + BLEED * 2, 0x0c0a1f, 0.88).setInteractive();
     o.add(dim);
 
     const card = this.add.container(W / 2, H / 2);
@@ -1193,7 +1279,7 @@ class MenuScene extends Phaser.Scene {
 
     const rows = [
       ['icon_rock_0', '1. CRAFTEA', 'Toca los 2 pasos de cada objeto. Cada paso tarda 2.5 segundos.'],
-      ['rock', '2. LANZA', 'Toca tu objeto listo y luego un carril. Viajará hacia la base enemiga.'],
+      ['rock', '2. LANZA', 'Arrastra tu objeto listo a un carril (o tócalo y luego toca el carril).'],
       ['scissors', '3. CHOCA', 'Piedra > Tijera > Papel > Piedra. El que pierde se destruye; si son iguales, ambos.'],
       ['trophy', '4. GANA', 'Cada objeto que llega a su base quita 10 HP. Déjalo en 0 o ten más vida al final.'],
     ];
@@ -1433,14 +1519,15 @@ class GameScene extends Phaser.Scene {
     this.buildFX();
     this.buildIntro();
     this.setupSockets();
+    this.setupDrag();
     this.events.once('shutdown', this.shutdown, this);
   }
 
   // ── HUD ───────────────────────────────────────────────────────────────────
   buildHUD() {
     const bg = this.add.graphics().setDepth(30);
-    bg.fillStyle(C.bgDeep, 1).fillRect(0, 0, W, HUD_H);
-    bg.fillStyle(C.line, 1).fillRect(0, HUD_H - 2, W, 2);
+    bg.fillStyle(C.bgDeep, 1).fillRect(-BLEED, -BLEED, W + BLEED * 2, HUD_H + BLEED);
+    bg.fillStyle(C.line, 1).fillRect(-BLEED, HUD_H - 2, W + BLEED * 2, 2);
 
     const short = s => (s.length > 11 ? s.slice(0, 10) + '…' : s);
 
@@ -1529,9 +1616,13 @@ class GameScene extends Phaser.Scene {
 
   // ── Field ─────────────────────────────────────────────────────────────────
   buildField() {
+    img(this, W / 2, HUD_H + FIELD_H / 2, 'field_side').setDisplaySize(W + BLEED * 2, FIELD_H);
     img(this, W / 2, HUD_H + FIELD_H / 2, 'field_bg');
-    img(this, W / 2, FIELD_TOP + 17, 'wall_enemy').setDepth(5);
-    img(this, W / 2, FIELD_BOT - 17, 'wall_me').setDepth(5);
+    // Walls tile seamlessly (merlon period 26 divides 390)
+    for (let k = -4; k <= 4; k++) {
+      img(this, W / 2 + k * W, FIELD_TOP + 17, 'wall_enemy').setDepth(5);
+      img(this, W / 2 + k * W, FIELD_BOT - 17, 'wall_me').setDepth(5);
+    }
 
     // Lane highlight shown while an item is selected
     this.laneHL = LANE_X.map((x) => {
@@ -1600,7 +1691,7 @@ class GameScene extends Phaser.Scene {
   buildCraftPanel() {
     const py = FIELD_BOT;
     const bg = this.add.graphics().setDepth(30);
-    bg.fillStyle(C.bgDeep, 1).fillRect(0, py, W, CRAFT_H);
+    bg.fillStyle(C.bgDeep, 1).fillRect(-BLEED, py, W + BLEED * 2, CRAFT_H + BLEED);
 
     TYPES.forEach((type, ci) => {
       const cx = LANE_X[ci];
@@ -1693,7 +1784,8 @@ class GameScene extends Phaser.Scene {
     this.updateInventoryUI(type);
 
     // Tap inv slot to select this item type for launching
-    c.on('pointerdown', () => this.onInvTap(type));
+    // Press to drag it onto a lane, or just tap to select it
+    c.on('pointerdown', pointer => this.onInvDown(type, pointer));
   }
 
   updateInventoryUI(type) {
@@ -1719,6 +1811,81 @@ class GameScene extends Phaser.Scene {
     this.tweens.killTweensOf(cont);
     cont.x = baseX;
     this.tweens.add({ targets: cont, x: baseX + 5, duration: 45, yoyo: true, repeat: 2, onComplete: () => { cont.x = baseX; } });
+  }
+
+  // ── Drag & drop ───────────────────────────────────────────────────────────
+  setupDrag() {
+    this.drag = null;
+    // Lane under the finger while dragging
+    this.dropHL = this.add.rectangle(LANE_X[0], HUD_H + FIELD_H / 2, LANE_W - 10, FIELD_H - 70, C.me, 0.2)
+      .setStrokeStyle(3, C.me, 0.9).setDepth(4).setVisible(false);
+    this.input.on('pointermove', p => this.onDragMove(p));
+    this.input.on('pointerup', p => this.onDragEnd(p));
+    this.input.on('pointerupoutside', p => this.onDragEnd(p));
+  }
+
+  onInvDown(type, pointer) {
+    if (!this.gameActive) return;
+    if (this.craft[type].inventory <= 0) { this.onInvTap(type); return; }
+    this.drag = { type, id: pointer.id, x: pointer.worldX, y: pointer.worldY, active: false, ghost: null };
+  }
+
+  laneAt(x, y) {
+    if (y < FIELD_TOP || y > FIELD_BOT || x < 0 || x >= W) return -1;
+    return Math.min(LANES - 1, Math.floor(x / LANE_W));
+  }
+
+  onDragMove(p) {
+    const d = this.drag;
+    if (!d || p.id !== d.id) return;
+    if (!d.active) {
+      if (Phaser.Math.Distance.Between(d.x, d.y, p.worldX, p.worldY) < 12) return;
+      if (!this.gameActive || this.craft[d.type].inventory <= 0) { this.drag = null; return; }
+      d.active = true;
+      d.ghost = this.add.container(p.worldX, p.worldY).setDepth(46);
+      d.ghost.add([
+        img(this, 0, 0, 'glow', 110).setTint(C.gold).setAlpha(0.55),
+        img(this, 0, 0, d.type, 58),
+      ]);
+      d.ghost.setScale(0.6);
+      this.tweens.add({ targets: d.ghost, scale: 1, duration: 120, ease: 'Back.easeOut' });
+      this.showLanes(true);
+      Sfx.play('select');
+    }
+    // Float above the finger so the item stays visible
+    d.ghost.setPosition(p.worldX, p.worldY - 34);
+    const lane = this.laneAt(p.worldX, p.worldY - 34);
+    this.dropHL.setVisible(lane >= 0);
+    if (lane >= 0) this.dropHL.x = LANE_X[lane];
+  }
+
+  onDragEnd(p) {
+    const d = this.drag;
+    if (!d || p.id !== d.id) return;
+    this.drag = null;
+    if (!d.active) { this.onInvTap(d.type); return; }   // it was a tap
+    this.dropHL.setVisible(false);
+    const lane = this.laneAt(p.worldX, p.worldY - 34);
+    if (lane >= 0 && this.gameActive && this.craft[d.type].inventory > 0) {
+      d.ghost.destroy();
+      this.selectItem(d.type);
+      this.launchSelected(lane);
+      return;
+    }
+    // Dropped outside the field: the item goes back to the inventory
+    const inv = this.invSlots[d.type];
+    this.tweens.add({
+      targets: d.ghost, x: inv.x, y: inv.y - 8, scale: 0.5, alpha: 0, duration: 180, ease: 'Quad.easeIn',
+      onComplete: () => d.ghost.destroy(),
+    });
+    this.showLanes(!!this.selectedItem);
+  }
+
+  cancelDrag() {
+    if (!this.drag) return;
+    if (this.drag.ghost) this.drag.ghost.destroy();
+    this.drag = null;
+    this.dropHL.setVisible(false);
   }
 
   // ── Craft Logic ───────────────────────────────────────────────────────────
@@ -1810,7 +1977,7 @@ class GameScene extends Phaser.Scene {
     this.selectedItem = type;
     TYPES.forEach(t => this.updateInventoryUI(t));
     this.showLanes(true);
-    if (this.stats.launched < 2) this.showHint('¡Toca un carril para lanzar!', C.gold, true);
+    if (this.stats.launched < 2) this.showHint('¡Arrástralo o toca un carril!', C.gold, true);
   }
 
   clearSelection() {
@@ -2098,7 +2265,8 @@ class GameScene extends Phaser.Scene {
     this.floatText(x, y - 36, '-10', C.enemy, 30);
     this.cameras.main.shake(200, 0.012);
     this.tweens.killTweensOf(this.vignette);
-    this.vignette.setAlpha(0.9);
+    const v = visibleRect();
+    this.vignette.setPosition(v.x + v.w / 2, v.y + v.h / 2).setDisplaySize(v.w, v.h).setAlpha(0.9);
     this.tweens.add({ targets: this.vignette, alpha: 0, duration: 500 });
     Sfx.play('hurt');
     buzz(90);
@@ -2135,7 +2303,7 @@ class GameScene extends Phaser.Scene {
   // ── Intro (VS + countdown) ────────────────────────────────────────────────
   buildIntro() {
     const o = this.add.container(0, 0).setDepth(50);
-    const dim = this.add.rectangle(W / 2, H / 2, W, H, C.bgDeep, 0.8);
+    const dim = this.add.rectangle(W / 2, H / 2, W + BLEED * 2, H + BLEED * 2, C.bgDeep, 0.8);
     const opp = this.banner(this.opponentName, C.enemy, this.vsBot ? 'BOT' : 'RIVAL').setPosition(W + 200, H / 2 - 120);
     const me = this.banner(this.myName, C.me, 'TÚ').setPosition(-200, H / 2 + 80);
     const vs = D(this, W / 2, H / 2 - 20, 'VS', 88, C.goldHex, { strokeThickness: 12 }).setScale(0);
@@ -2237,6 +2405,7 @@ class GameScene extends Phaser.Scene {
       const oppHp = hp[oppId] || 0;
       this.updateMyHp(myHp);
       this.updateOppHp(oppHp);
+      this.cancelDrag();
       this.clearSelection();
       CG.gameplayStop();
       this.showFinale(myHp <= 0 || oppHp <= 0 ? '¡K.O.!' : '¡TIEMPO!');
@@ -2256,6 +2425,7 @@ class GameScene extends Phaser.Scene {
       if (this.ending) return;
       this.ending = true;
       this.gameActive = false;
+      this.cancelDrag();
       this.clearSelection();
       CG.gameplayStop();
       this.showFinale('¡HUYÓ!', C.meHex);
@@ -2316,6 +2486,7 @@ class GameOverScene extends Phaser.Scene {
     this.oppGone = !!disconnected;
     this.wantRematch = false;
 
+    bleedFill(this, C.bgDeep);
     img(this, W / 2, H / 2, 'menu_bg');
     this.floaters = addFloaters(this, 8);
 
@@ -2501,12 +2672,12 @@ class GameOverScene extends Phaser.Scene {
 const config = {
   type: Phaser.AUTO,
   parent: 'game',
-  width: W * RES,
-  height: H * RES,
+  width: LAYOUT.cw,
+  height: LAYOUT.ch,
   backgroundColor: '#0c0a1f',
   scale: {
-    mode: Phaser.Scale.FIT,
-    autoCenter: Phaser.Scale.CENTER_BOTH,
+    mode: Phaser.Scale.NONE,
+    zoom: 1 / DPR,
   },
   input: { activePointers: 3 },
   disableContextMenu: true,
@@ -2539,8 +2710,11 @@ window.addEventListener('load', () => {
     if (params.has('room')) {
       try { history.replaceState(null, '', location.pathname); } catch (e) { /* sandboxed */ }
     }
+    // The canvas covers the whole screen (also behind the notch)
+    document.getElementById('game').style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;';
+    relayout();
     phaserGame = new Phaser.Game(config);
-    // On iOS the safe-area insets (notch) settle after boot: refit a few times
-    [250, 800, 2000].forEach(ms => setTimeout(() => phaserGame.scale.refresh(), ms));
+    // On iOS the safe-area insets settle after boot: re-measure a few times
+    [250, 800, 2000].forEach(ms => setTimeout(relayout, ms));
   });
 });
