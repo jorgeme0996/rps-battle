@@ -1,0 +1,14 @@
+{
+  "name": "RPS Battle",
+  "short_name": "RPS Battle",
+  "description": "Craftea piedra, papel o tijera y lánzaselos a tu rival en tiempo real.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0c0a1f",
+  "theme_color": "#0c0a1f",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

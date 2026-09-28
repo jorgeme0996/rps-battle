@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="30%" r="80%">
+      <stop offset="0" stop-color="#2d2468"/>
+      <stop offset="1" stop-color="#0c0a1f"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff1a8"/>
+      <stop offset="1" stop-color="#ffc93c"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <!-- rock -->
+  <path d="M112 196 q20-44 66-40 q46 6 56 50 q6 46-40 62 q-50 14-74-18 q-20-24-8-54z" fill="#a8a29e" stroke="#1a1433" stroke-width="12" stroke-linejoin="round"/>
+  <!-- paper -->
+  <g transform="rotate(-8 256 180)">
+    <path d="M216 110 h62 l26 26 v108 h-88z" fill="#fff8e6" stroke="#1a1433" stroke-width="12" stroke-linejoin="round"/>
+    <path d="M234 160 h52 M234 184 h52 M234 208 h52" stroke="#8fb3ff" stroke-width="7" stroke-linecap="round"/>
+  </g>
+  <!-- scissors -->
+  <g stroke="#1a1433" stroke-width="10" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M338 108 l60 104 l-10 14 l-18-8z" fill="#d7e0ea"/>
+    <path d="M436 108 l-60 104 l10 14 l18-8z" fill="#d7e0ea"/>
+    <circle cx="362" cy="254" r="20" fill="none" stroke="#ff9f1c" stroke-width="12"/>
+    <circle cx="412" cy="254" r="20" fill="none" stroke="#ff9f1c" stroke-width="12"/>
+  </g>
+  <text x="256" y="420" text-anchor="middle" font-family="'Arial Black', Impact, sans-serif" font-size="128" font-weight="900" fill="url(#gold)" stroke="#1a1433" stroke-width="10" paint-order="stroke">RPS</text>
+</svg>
