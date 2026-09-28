@@ -87,8 +87,17 @@ const TIPS = [
 let socket = null;
 let roomId  = null;
 
-// Game server. Empty = same origin; the CrazyGames build sets window.RPS_SERVER
+// Game server. Empty = same origin; the CrazyGames and iOS builds set window.RPS_SERVER
 const SERVER_URL = window.RPS_SERVER || '';
+// Links people can open in a browser (inside the iOS app location.origin is capacitor://)
+const PUBLIC_URL = SERVER_URL || location.origin;
+
+// Running inside the iOS app (Capacitor)?
+const NATIVE = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+const nativePlugin = name => (NATIVE && window.Capacitor.Plugins && window.Capacitor.Plugins[name]) || null;
+
+// Player name picked automatically (Game Center alias or a generated one) — iOS app only
+let autoName = null;
 
 // Invite code this page was opened with (?room=CODE or a CrazyGames invite)
 let pendingInvite = null;
@@ -130,7 +139,43 @@ function track(event, props = {}) {
 }
 
 function buzz(ms) {
+  const haptics = nativePlugin('Haptics'); // iPhone has no navigator.vibrate
+  if (haptics) { haptics.impact({ style: ms >= 80 ? 'HEAVY' : 'MEDIUM' }).catch(() => {}); return; }
   try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) { /* unsupported */ }
+}
+
+// Native share sheet in the app, Web Share API in the browser. Resolves false if unavailable.
+async function shareSheet({ title, text, url }) {
+  const share = nativePlugin('Share');
+  try {
+    if (share) { await share.share({ title, text, url, dialogTitle: title }); return true; }
+    if (navigator.share && !CG.enabled) { await navigator.share({ title, text, url }); return true; }
+  } catch (e) { return true; /* user cancelled */ }
+  return false;
+}
+
+// e.g. "TijeraVeloz42" — used when there is no Game Center alias
+function randomPlayerName() {
+  const a = ['Piedra', 'Papel', 'Tijera', 'Roca', 'Filo'];
+  const b = ['Veloz', 'Feroz', 'Letal', 'Ninja', 'Turbo', 'Audaz', 'Voraz', 'Rebelde'];
+  const r = arr => arr[Math.floor(Math.random() * arr.length)];
+  return `${r(a)}${r(b)}${Math.floor(10 + Math.random() * 90)}`;
+}
+
+// iOS: a generated name right away, replaced by the Game Center alias (like
+// Clash Royale) as soon as Game Center answers — the game never waits for it.
+function setupNativeName() {
+  autoName = store.get('rps_auto_name');
+  if (!autoName) { autoName = randomPlayerName(); store.set('rps_auto_name', autoName); }
+  const gc = nativePlugin('GameCenter');
+  if (!gc) return;
+  gc.signIn().then(player => {
+    const alias = player && (player.alias || player.displayName);
+    if (!alias) return;
+    autoName = String(alias).slice(0, 16);
+    const menu = phaserGame && phaserGame.scene.getScene('Menu');
+    if (menu && menu.scene.isActive() && menu.refreshPlayerCard) menu.refreshPlayerCard();
+  }).catch(() => { /* not signed in or declined: keep the generated name */ });
 }
 
 function setupCamera(scene) {
@@ -435,7 +480,7 @@ const CG = {
 };
 
 function inviteUrl(code) {
-  return CG.inviteLink({ room: code }) || `${location.origin}${location.pathname}?room=${code}`;
+  return CG.inviteLink({ room: code }) || `${PUBLIC_URL}/?room=${code}`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -992,9 +1037,59 @@ class MenuScene extends Phaser.Scene {
   }
 
   buildForm() {
-    T(this, W / 2, 320, 'TU NOMBRE', { fontStyle: '900', fontSize: '13px', color: C.muted }).setOrigin(0.5);
+    if (autoName) this.buildPlayerCard();
+    else this.buildNameInput();
 
-    // Plain HTML input laid over the canvas (Phaser DOM ignores camera zoom)
+    this.playBtn = makeButton(this, W / 2, 444, 250, 66, '¡JUGAR!', BTN.green, () => {
+      if (this.isConnecting) this.cancelConnect();
+      else this.startConnect();
+    }, 32);
+    this.playPulse = this.tweens.add({
+      targets: this.playBtn, scale: 1.05, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
+    });
+
+    this.friendBtn = makeButton(this, W / 2, 522, 250, 50, 'JUGAR CON AMIGO', BTN.purple, () => {
+      if (this.mode === 'host') this.shareInvite();
+      else if (!this.isConnecting) this.startConnect('host');
+    }, 21);
+
+    const how = T(this, W / 2, 584, '¿Cómo se juega?', {
+      fontStyle: '900', fontSize: '16px', color: C.goldHex,
+    }).setOrigin(0.5).setInteractive({ useHandCursor: true });
+    const ul = this.add.rectangle(W / 2, 597, how.displayWidth, 2, C.gold, 0.6);
+    how.on('pointerup', () => { Sfx.play('tap'); this.showTutorial(); });
+    this.howLink = [how, ul];
+  }
+
+  // iOS app: the name comes from Game Center, nothing to type
+  buildPlayerCard() {
+    const c = this.add.container(W / 2, 358);
+    const g = this.add.graphics();
+    g.fillStyle(C.panel, 0.95).fillRoundedRect(-125, -30, 250, 60, 18);
+    g.lineStyle(3, C.line, 1).strokeRoundedRect(-125, -30, 250, 60, 18);
+    g.fillStyle(C.ink, 1).fillCircle(-94, 0, 20);
+    g.fillStyle(C.me, 1).fillCircle(-94, 0, 17);
+    this.cardInitial = D(this, -94, 1, autoName[0].toUpperCase(), 20, INK, { strokeThickness: 0 });
+    this.cardName = T(this, -64, 10, autoName, { fontStyle: '900', fontSize: '19px' }).setOrigin(0, 0.5);
+    c.add([
+      g,
+      this.cardInitial,
+      T(this, -64, -9, 'JUGANDO COMO', { fontStyle: '900', fontSize: '11px', color: C.muted }).setOrigin(0, 0.5),
+      this.cardName,
+    ]);
+    this.nameInput = { setVisible: () => {} };
+  }
+
+  // Game Center answered after the menu was drawn
+  refreshPlayerCard() {
+    if (!this.cardName || !this.cardName.active) return;
+    this.cardName.setText(autoName);
+    this.cardInitial.setText(autoName[0].toUpperCase());
+  }
+
+  // Web: plain HTML input laid over the canvas
+  buildNameInput() {
+    T(this, W / 2, 320, 'TU NOMBRE', { fontStyle: '900', fontSize: '13px', color: C.muted }).setOrigin(0.5);
     const inputEl = document.getElementById('nameInput');
     this.nameInput = {
       setVisible: (on) => { inputEl.style.display = on ? 'block' : 'none'; },
@@ -1022,27 +1117,8 @@ class MenuScene extends Phaser.Scene {
     inputEl.onkeydown = e => {
       if (e.key === 'Enter') { inputEl.blur(); this.startConnect(); }
     };
-
-    this.playBtn = makeButton(this, W / 2, 444, 250, 66, '¡JUGAR!', BTN.green, () => {
-      if (this.isConnecting) this.cancelConnect();
-      else this.startConnect();
-    }, 32);
-    this.playPulse = this.tweens.add({
-      targets: this.playBtn, scale: 1.05, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
-    });
-
-    this.friendBtn = makeButton(this, W / 2, 522, 250, 50, 'JUGAR CON AMIGO', BTN.purple, () => {
-      if (this.mode === 'host') this.shareInvite();
-      else if (!this.isConnecting) this.startConnect('host');
-    }, 21);
-
-    const how = T(this, W / 2, 584, '¿Cómo se juega?', {
-      fontStyle: '900', fontSize: '16px', color: C.goldHex,
-    }).setOrigin(0.5).setInteractive({ useHandCursor: true });
-    const ul = this.add.rectangle(W / 2, 597, how.displayWidth, 2, C.gold, 0.6);
-    how.on('pointerup', () => { Sfx.play('tap'); this.showTutorial(); });
-    this.howLink = [how, ul];
   }
+
 
   buildRulesCard() {
     const c = this.add.container(W / 2, 702);
@@ -1155,10 +1231,10 @@ class MenuScene extends Phaser.Scene {
     if (this.isConnecting) return;
     this.mode = mode;
     this.privateCode = code;
-    const inputEl = document.getElementById('nameInput');
-    const typed = inputEl ? inputEl.value.trim() : '';
+    const inputEl = autoName ? null : document.getElementById('nameInput');
+    const typed = autoName || (inputEl ? inputEl.value.trim() : '');
     const name = typed || 'Jugador';
-    if (!CG.username) store.set('rps_name', typed);
+    if (inputEl && !CG.username) store.set('rps_name', typed);
     if (inputEl) { inputEl.blur(); inputEl.disabled = true; }
 
     Sfx.play('select');
@@ -1264,9 +1340,13 @@ class MenuScene extends Phaser.Scene {
     Sfx.play('tap');
     const url = inviteUrl(this.privateCode);
     const text = `¡Te reto en RPS Battle! Mi sala: ${this.privateCode}`;
-    if (navigator.share && !CG.enabled) {
-      navigator.share({ title: 'RPS Battle', text, url }).catch(() => { /* cancelled */ });
-    } else if (navigator.clipboard) {
+    shareSheet({ title: 'RPS Battle', text, url }).then(shown => {
+      if (!shown) this.copyInvite(url);
+    });
+  }
+
+  copyInvite(url) {
+    if (navigator.clipboard) {
       navigator.clipboard.writeText(url)
         .then(() => toast(this, '¡Enlace copiado! Pásaselo a tu amigo', H - 60))
         .catch(() => toast(this, `Código de sala: ${this.privateCode}`, H - 60));
@@ -1290,7 +1370,7 @@ class MenuScene extends Phaser.Scene {
     Sfx.play('tap');
     if (this.searchTimer) { this.searchTimer.remove(); this.searchTimer = null; }
     if (this.tipTimer) { this.tipTimer.remove(); this.tipTimer = null; }
-    const inputEl = document.getElementById('nameInput');
+    const inputEl = autoName ? null : document.getElementById('nameInput');
     if (inputEl) inputEl.disabled = !!CG.username;
     this.isConnecting = false;
     this.playBtn.restyle('¡JUGAR!', BTN.green);
@@ -2394,14 +2474,18 @@ class GameOverScene extends Phaser.Scene {
 
   share(result, oppName) {
     track('share_click', { result });
-    const url = CG.inviteLink({ ref: 'share' }) || location.origin;
+    const url = CG.inviteLink({ ref: 'share' }) || PUBLIC_URL;
     const text = result === 'win'
       ? `¡Le gané a ${oppName} en RPS Battle! ⚔️ ¿Te atreves a retarme?`
       : '¡Juega RPS Battle conmigo! Craftea piedra, papel o tijera y lánzaselos a tu rival ⚔️';
     Sfx.play('tap');
-    if (navigator.share && !CG.enabled) {
-      navigator.share({ title: 'RPS Battle', text, url }).catch(() => { /* cancelled */ });
-    } else if (navigator.clipboard) {
+    shareSheet({ title: 'RPS Battle', text, url }).then(shown => {
+      if (!shown) this.copyShare(text, url);
+    });
+  }
+
+  copyShare(text, url) {
+    if (navigator.clipboard) {
       navigator.clipboard.writeText(`${text} ${url}`)
         .then(() => toast(this, '¡Enlace copiado!', 790))
         .catch(() => toast(this, url, 790));
@@ -2449,11 +2533,14 @@ window.addEventListener('load', () => {
     Promise.race([fonts, timeout(2500)]).catch(() => {}),
     Promise.race([CG.init(), timeout(4000)]).catch(() => {}),
   ]).then(() => {
+    if (NATIVE) setupNativeName();
     const params = new URLSearchParams(location.search);
     pendingInvite = CG.inviteParam('room') || params.get('room');
     if (params.has('room')) {
       try { history.replaceState(null, '', location.pathname); } catch (e) { /* sandboxed */ }
     }
     phaserGame = new Phaser.Game(config);
+    // On iOS the safe-area insets (notch) settle after boot: refit a few times
+    [250, 800, 2000].forEach(ms => setTimeout(() => phaserGame.scale.refresh(), ms));
   });
 });
