@@ -87,6 +87,14 @@ const TIPS = [
 let socket = null;
 let roomId  = null;
 
+// Game server. Empty = same origin; the CrazyGames build sets window.RPS_SERVER
+const SERVER_URL = window.RPS_SERVER || '';
+
+// Invite code this page was opened with (?room=CODE or a CrazyGames invite)
+let pendingInvite = null;
+let instantMultiplayerUsed = false;
+let phaserGame = null;
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  HELPERS
 // ═══════════════════════════════════════════════════════════════════════════
@@ -112,8 +120,12 @@ const PLAYER_ID = (() => {
 function track(event, props = {}) {
   try {
     const body = JSON.stringify({ event, playerId: PLAYER_ID, props });
-    if (navigator.sendBeacon) navigator.sendBeacon('/api/event', new Blob([body], { type: 'application/json' }));
-    else fetch('/api/event', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {});
+    // text/plain keeps it a "simple" request, so it also works cross-origin
+    const url = `${SERVER_URL}/api/event`;
+    const blob = new Blob([body], { type: 'text/plain' });
+    if (!(navigator.sendBeacon && navigator.sendBeacon(url, blob))) {
+      fetch(url, { method: 'POST', body: blob, keepalive: true, mode: 'no-cors' }).catch(() => {});
+    }
   } catch (e) { /* analytics must never break the game */ }
 }
 
@@ -265,6 +277,12 @@ const Sfx = {
     if (this.ctx.state === 'suspended') this.ctx.resume();
   },
 
+  // Silence everything while a video ad plays
+  pause(on) {
+    if (!this.ctx) return;
+    if (on) this.ctx.suspend(); else this.ctx.resume();
+  },
+
   toggle() {
     this.muted = !this.muted;
     store.set('rps_muted', this.muted ? '1' : '0');
@@ -342,6 +360,83 @@ const Sfx = {
 ['pointerdown', 'touchend', 'keydown'].forEach(evt =>
   window.addEventListener(evt, () => Sfx.unlock(), { passive: true, capture: true })
 );
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CRAZYGAMES SDK  –  every call is a no-op outside CrazyGames
+// ═══════════════════════════════════════════════════════════════════════════
+const CG = {
+  sdk: null,
+  enabled: false,
+  username: null,
+  instantMultiplayer: false,
+
+  async init() {
+    const sdk = window.CrazyGames && window.CrazyGames.SDK;
+    if (!sdk) return;
+    try {
+      await sdk.init();
+      if (sdk.environment === 'disabled') return;
+      this.sdk = sdk;
+      this.enabled = true;
+      sdk.game.loadingStart();
+      this.instantMultiplayer = !!sdk.game.isInstantMultiplayer;
+      try {
+        const user = await sdk.user.getUser();
+        if (user && user.username) this.username = user.username.slice(0, 16);
+      } catch (e) { /* not logged in */ }
+      sdk.game.addJoinRoomListener(params => {
+        if (params && params.room) CG.onJoinRoom(String(params.room));
+      });
+    } catch (e) {
+      console.warn('CrazyGames SDK init failed', e);
+    }
+  },
+
+  call(fn) {
+    if (!this.enabled) return undefined;
+    try { return fn(this.sdk); } catch (e) { console.warn('CrazyGames SDK', e); return undefined; }
+  },
+
+  loadingStop()    { this.call(s => s.game.loadingStop()); },
+  gameplayStart()  { this.call(s => s.game.gameplayStart()); },
+  gameplayStop()   { this.call(s => s.game.gameplayStop()); },
+  happytime()      { this.call(s => s.game.happytime()); },
+  inviteParam(key) { return this.call(s => s.game.getInviteParam(key)) || null; },
+  inviteLink(params) { return this.call(s => s.game.inviteLink(params)); },
+  showInviteButton(params) { this.call(s => s.game.showInviteButton(params)); },
+  hideInviteButton() { this.call(s => s.game.hideInviteButton()); },
+  // Room presence (newer SDK builds only)
+  updateRoom(opts) { this.call(s => typeof s.game.updateRoom === 'function' && s.game.updateRoom(opts)); },
+  leftRoom()       { this.call(s => typeof s.game.leftRoom === 'function' && s.game.leftRoom()); },
+
+  // Resolves when the ad is over (or there was none)
+  midgameAd() {
+    return new Promise(resolve => {
+      if (!this.enabled) { resolve(); return; }
+      const done = () => { Sfx.pause(false); resolve(); };
+      const requested = this.call(s => {
+        s.ad.requestAd('midgame', {
+          adStarted: () => Sfx.pause(true),
+          adFinished: done,
+          adError: done,
+        });
+        return true;
+      });
+      if (!requested) done();
+    });
+  },
+
+  // An invite was accepted while the game is already open
+  onJoinRoom(code) {
+    const menu = phaserGame && phaserGame.scene.getScene('Menu');
+    if (menu && menu.scene.isActive() && !menu.isConnecting) menu.startConnect('join', code);
+    else pendingInvite = code;
+  },
+};
+
+function inviteUrl(code) {
+  return CG.inviteLink({ room: code }) || `${location.origin}${location.pathname}?room=${code}`;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  CANVAS DRAWING  –  all art is generated here, no image files
@@ -508,6 +603,7 @@ class BootScene extends Phaser.Scene {
 
   create() {
     this.generateTextures();
+    CG.loadingStop();
     const loader = document.getElementById('loader');
     if (loader) {
       loader.classList.add('hide');
@@ -834,7 +930,15 @@ class MenuScene extends Phaser.Scene {
     this.events.once('shutdown', () => this.cleanup());
 
     if (this.notice) toast(this, this.notice, H - 60, C.enemy);
-    if (this.autoStart) this.time.delayedCall(250, () => this.startConnect());
+    if (pendingInvite) {
+      // Opened from an invite: go straight into the friend's room, no onboarding
+      const code = pendingInvite;
+      pendingInvite = null;
+      this.time.delayedCall(250, () => this.startConnect('join', code));
+    } else if (CG.instantMultiplayer && !instantMultiplayerUsed) {
+      instantMultiplayerUsed = true;
+      this.time.delayedCall(250, () => this.startConnect('host'));
+    } else if (this.autoStart) this.time.delayedCall(250, () => this.startConnect());
     else if (!store.get('rps_tutorial_seen')) this.time.delayedCall(900, () => this.showTutorial(true));
   }
 
@@ -912,8 +1016,9 @@ class MenuScene extends Phaser.Scene {
       this.nameInput.setVisible(false);
       inputEl.onkeydown = null;
     });
-    inputEl.value = store.get('rps_name', '');
-    inputEl.disabled = false;
+    // Logged-in CrazyGames players always show their CrazyGames username
+    inputEl.value = CG.username || store.get('rps_name', '');
+    inputEl.disabled = !!CG.username;
     inputEl.onkeydown = e => {
       if (e.key === 'Enter') { inputEl.blur(); this.startConnect(); }
     };
@@ -926,16 +1031,21 @@ class MenuScene extends Phaser.Scene {
       targets: this.playBtn, scale: 1.05, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
     });
 
-    const how = T(this, W / 2, 520, '¿Cómo se juega?', {
+    this.friendBtn = makeButton(this, W / 2, 522, 250, 50, 'JUGAR CON AMIGO', BTN.purple, () => {
+      if (this.mode === 'host') this.shareInvite();
+      else if (!this.isConnecting) this.startConnect('host');
+    }, 21);
+
+    const how = T(this, W / 2, 584, '¿Cómo se juega?', {
       fontStyle: '900', fontSize: '16px', color: C.goldHex,
     }).setOrigin(0.5).setInteractive({ useHandCursor: true });
-    const ul = this.add.rectangle(W / 2, 533, how.displayWidth, 2, C.gold, 0.6);
+    const ul = this.add.rectangle(W / 2, 597, how.displayWidth, 2, C.gold, 0.6);
     how.on('pointerup', () => { Sfx.play('tap'); this.showTutorial(); });
     this.howLink = [how, ul];
   }
 
   buildRulesCard() {
-    const c = this.add.container(W / 2, 660);
+    const c = this.add.container(W / 2, 702);
     const g = this.add.graphics();
     g.fillStyle(C.panel, 0.85).fillRoundedRect(-171, -72, 342, 144, 20);
     g.lineStyle(2, C.line, 1).strokeRoundedRect(-171, -72, 342, 144, 20);
@@ -955,7 +1065,7 @@ class MenuScene extends Phaser.Scene {
   }
 
   buildSearchCard() {
-    const c = this.add.container(W / 2, 668).setAlpha(0).setVisible(false);
+    const c = this.add.container(W / 2, 708).setAlpha(0).setVisible(false);
     const g = this.add.graphics();
     g.fillStyle(C.panel, 0.92).fillRoundedRect(-171, -90, 342, 180, 20);
     g.lineStyle(2, C.gold, 0.7).strokeRoundedRect(-171, -90, 342, 180, 20);
@@ -984,6 +1094,7 @@ class MenuScene extends Phaser.Scene {
     this.tweens.add({ targets: inCard, alpha: 1, duration: 200 });
     this.tweens.add({ targets: outCard, alpha: 0, duration: 150, onComplete: () => outCard.setVisible(false) });
     this.howLink.forEach(o => o.setVisible(!on));
+    this.friendBtn.setVisible(!on || this.mode === 'host');
   }
 
   // ── Tutorial ──────────────────────────────────────────────────────────────
@@ -1039,12 +1150,15 @@ class MenuScene extends Phaser.Scene {
   }
 
   // ── Matchmaking ───────────────────────────────────────────────────────────
-  startConnect() {
+  // mode: 'queue' (random rival), 'host' (private room), 'join' (friend's room)
+  startConnect(mode = 'queue', code = null) {
     if (this.isConnecting) return;
+    this.mode = mode;
+    this.privateCode = code;
     const inputEl = document.getElementById('nameInput');
     const typed = inputEl ? inputEl.value.trim() : '';
     const name = typed || 'Jugador';
-    store.set('rps_name', typed);
+    if (!CG.username) store.set('rps_name', typed);
     if (inputEl) { inputEl.blur(); inputEl.disabled = true; }
 
     Sfx.play('select');
@@ -1054,18 +1168,23 @@ class MenuScene extends Phaser.Scene {
     this.playBtn.restyle('CANCELAR', BTN.red);
     this.showSearch(true);
     this.setStatus('Conectando');
+    if (mode === 'host') this.friendBtn.restyle('INVITAR AMIGO', BTN.blue);
 
     this.searchStart = this.time.now;
     let tip = Phaser.Math.Between(0, TIPS.length - 1);
-    this.searchTip.setText(TIPS[tip]);
+    this.searchTip.setText(mode === 'host' ? 'Comparte el enlace con tu amigo' : TIPS[tip]);
     this.searchClock.setText('0:00');
     this.searchTimer = this.time.addEvent({
       delay: 400, loop: true,
       callback: () => {
         const secs = Math.floor((this.time.now - this.searchStart) / 1000);
         const botIn = this.botAt ? Math.ceil((this.botAt - this.time.now) / 1000) : 0;
-        this.searchClock.setText(`${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`
-          + (botIn > 0 ? `  ·  si no hay rivales, bot en ${botIn} s` : ''));
+        const clock = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+        if (this.mode === 'host') {
+          this.searchClock.setText(this.privateCode ? `Código: ${this.privateCode}  ·  ${clock}` : clock);
+        } else {
+          this.searchClock.setText(clock + (botIn > 0 ? `  ·  si no hay rivales, bot en ${botIn} s` : ''));
+        }
         this.dots = ((this.dots || 0) + 1) % 4;
         this.searchStatus.setText(this.statusBase + '.'.repeat(this.dots));
       },
@@ -1073,6 +1192,7 @@ class MenuScene extends Phaser.Scene {
     this.tipTimer = this.time.addEvent({
       delay: 3500, loop: true,
       callback: () => {
+        if (this.mode === 'host') return;
         tip = (tip + 1) % TIPS.length;
         this.tweens.add({
           targets: this.searchTip, alpha: 0, duration: 150, yoyo: true,
@@ -1082,17 +1202,33 @@ class MenuScene extends Phaser.Scene {
     });
 
     // Connect socket
-    socket = io();
+    socket = SERVER_URL ? io(SERVER_URL) : io();
 
     socket.on('connect', () => {
-      this.setStatus('Buscando rival');
-      socket.emit('join', {
-        playerName: name,
-        playerId: PLAYER_ID,
-        source: this.autoStart ? 'rematch' : 'menu',
-        lastVsBot: this.lastVsBot,
-      });
+      const who = { playerName: name, playerId: PLAYER_ID };
+      if (this.mode === 'host') {
+        this.setStatus('Creando sala');
+        socket.emit('createPrivate', who);
+      } else if (this.mode === 'join') {
+        this.setStatus('Entrando a la sala');
+        socket.emit('joinPrivate', { ...who, code: this.privateCode });
+      } else {
+        this.setStatus('Buscando rival');
+        socket.emit('join', { ...who, source: this.autoStart ? 'rematch' : 'menu', lastVsBot: this.lastVsBot });
+      }
       this.autoStart = false;
+    });
+
+    socket.on('privateCreated', ({ code: newCode }) => {
+      this.privateCode = newCode;
+      this.setStatus('Esperando a tu amigo');
+      CG.showInviteButton({ room: newCode });
+      CG.updateRoom({ roomId: `private_${newCode}`, isJoinable: true, inviteParams: { room: newCode } });
+    });
+
+    socket.on('privateNotFound', () => {
+      this.cancelConnect();
+      toast(this, 'Esa sala ya no está disponible', H - 60, C.enemy);
     });
 
     socket.on('waiting', (data) => {
@@ -1102,6 +1238,8 @@ class MenuScene extends Phaser.Scene {
 
     socket.on('matched', (data) => {
       roomId = data.roomId;
+      CG.hideInviteButton();
+      CG.updateRoom({ roomId: data.roomId, isJoinable: false });
       Sfx.play('ready');
       this.scene.start('Game', {
         myName: data.myName,
@@ -1121,16 +1259,39 @@ class MenuScene extends Phaser.Scene {
     this.searchStatus.setText(text);
   }
 
+  shareInvite() {
+    if (!this.privateCode) return;
+    Sfx.play('tap');
+    const url = inviteUrl(this.privateCode);
+    const text = `¡Te reto en RPS Battle! Mi sala: ${this.privateCode}`;
+    if (navigator.share && !CG.enabled) {
+      navigator.share({ title: 'RPS Battle', text, url }).catch(() => { /* cancelled */ });
+    } else if (navigator.clipboard) {
+      navigator.clipboard.writeText(url)
+        .then(() => toast(this, '¡Enlace copiado! Pásaselo a tu amigo', H - 60))
+        .catch(() => toast(this, `Código de sala: ${this.privateCode}`, H - 60));
+    } else {
+      toast(this, `Código de sala: ${this.privateCode}`, H - 60);
+    }
+  }
+
   cancelConnect() {
     if (socket) {
       socket.disconnect();
       socket = null;
     }
+    if (this.mode === 'host') {
+      CG.hideInviteButton();
+      CG.leftRoom();
+    }
+    this.mode = null;
+    this.privateCode = null;
+    this.friendBtn.restyle('JUGAR CON AMIGO', BTN.purple);
     Sfx.play('tap');
     if (this.searchTimer) { this.searchTimer.remove(); this.searchTimer = null; }
     if (this.tipTimer) { this.tipTimer.remove(); this.tipTimer = null; }
     const inputEl = document.getElementById('nameInput');
-    if (inputEl) inputEl.disabled = false;
+    if (inputEl) inputEl.disabled = !!CG.username;
     this.isConnecting = false;
     this.playBtn.restyle('¡JUGAR!', BTN.green);
     this.playPulse.resume();
@@ -1139,7 +1300,10 @@ class MenuScene extends Phaser.Scene {
 
   cleanup() {
     // A socket.io auto-reconnect must not re-run the menu's join logic mid-game
-    if (socket) ['connect', 'waiting', 'matched', 'connect_error'].forEach(e => socket.off(e));
+    if (socket) {
+      ['connect', 'waiting', 'matched', 'connect_error', 'privateCreated', 'privateNotFound']
+        .forEach(e => socket.off(e));
+    }
   }
 }
 
@@ -1959,6 +2123,7 @@ class GameScene extends Phaser.Scene {
 
     socket.on('gameStart', () => {
       this.gameActive = true;
+      CG.gameplayStart();
       this.endIntro();
       this.time.delayedCall(700, () => {
         if (!this.selectedItem) this.showHint('¡Craftea! Toca el paso 1 ↓', C.gold);
@@ -1993,6 +2158,7 @@ class GameScene extends Phaser.Scene {
       this.updateMyHp(myHp);
       this.updateOppHp(oppHp);
       this.clearSelection();
+      CG.gameplayStop();
       this.showFinale(myHp <= 0 || oppHp <= 0 ? '¡K.O.!' : '¡TIEMPO!');
       this.time.delayedCall(1600, () => this.scene.start('GameOver', {
         result: isDraw ? 'draw' : (iWon ? 'win' : 'lose'),
@@ -2001,6 +2167,7 @@ class GameScene extends Phaser.Scene {
         myName: this.myName,
         oppName: this.opponentName,
         vsBot: this.vsBot,
+        roomId: this.roomId,
         stats: { ...this.stats, damage: MAX_HP - oppHp },
       }));
     });
@@ -2010,6 +2177,7 @@ class GameScene extends Phaser.Scene {
       this.ending = true;
       this.gameActive = false;
       this.clearSelection();
+      CG.gameplayStop();
       this.showFinale('¡HUYÓ!', C.meHex);
       this.time.delayedCall(1200, () => this.scene.start('GameOver', {
         result: 'win',
@@ -2027,6 +2195,8 @@ class GameScene extends Phaser.Scene {
       if (this.ending || reason === 'io client disconnect') return;
       this.ending = true;
       this.gameActive = false;
+      CG.gameplayStop();
+      CG.leftRoom();
       const s = socket;
       socket = null;
       s.disconnect(); // stop auto-reconnect, the room is gone anyway
@@ -2063,6 +2233,8 @@ class GameOverScene extends Phaser.Scene {
   create() {
     setupCamera(this);
     const { result, myHp, oppHp, myName, oppName, disconnected, stats = {} } = this.data2;
+    this.oppGone = !!disconnected;
+    this.wantRematch = false;
 
     img(this, W / 2, H / 2, 'menu_bg');
     this.floaters = addFloaters(this, 8);
@@ -2128,19 +2300,70 @@ class GameOverScene extends Phaser.Scene {
     });
 
     // Buttons
-    const leave = (autoStart) => {
-      if (socket) socket.disconnect();
-      socket = null;
-      roomId = null;
-      this.scene.start('Menu', { autoStart, lastVsBot: !!this.data2.vsBot });
-    };
-    const again = makeButton(this, W / 2, 640, 280, 68, 'REVANCHA', BTN.green, () => leave(true), 32);
-    this.tweens.add({ targets: again, scale: 1.05, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.easeInOut', delay: 1200 });
-    makeButton(this, W / 2 - 72, 728, 130, 54, 'MENÚ', BTN.purple, () => leave(false), 22);
+    this.again = makeButton(this, W / 2, 640, 280, 68, this.oppGone ? 'NUEVO RIVAL' : 'REVANCHA', BTN.green,
+      () => this.onRematch(), 32);
+    this.againPulse = this.tweens.add({
+      targets: this.again, scale: 1.05, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.easeInOut', delay: 1200,
+    });
+    makeButton(this, W / 2 - 72, 728, 130, 54, 'MENÚ', BTN.purple, () => this.leave(false), 22);
     makeButton(this, W / 2 + 72, 728, 130, 54, 'COMPARTIR', BTN.blue, () => this.share(result, oppName), 20);
     addMuteButton(this, W - 32, 34);
 
+    this.setupSockets();
+    this.events.once('shutdown', () => {
+      if (socket) ['rematchRequested', 'rematchStart', 'rematchUnavailable', 'opponentLeft'].forEach(e => socket.off(e));
+    });
+
     Sfx.play(result === 'win' ? 'win' : result === 'lose' ? 'lose' : 'draw');
+    if (result === 'win') CG.happytime();
+    // Natural break between matches: the SDK decides whether an ad is due
+    CG.midgameAd();
+  }
+
+  setupSockets() {
+    if (!socket) return;
+    socket.on('rematchRequested', () => {
+      if (this.wantRematch) return;
+      Sfx.play('select');
+      toast(this, `¡${this.data2.oppName} quiere la revancha!`, 790);
+      this.again.restyle('¡ACEPTAR!', BTN.green);
+    });
+    socket.on('rematchStart', () => {
+      this.scene.start('Game', {
+        myName: this.data2.myName,
+        opponentName: this.data2.oppName,
+        roomId: this.data2.roomId,
+        isBot: !!this.data2.vsBot,
+      });
+    });
+    const gone = () => {
+      if (this.oppGone) return;
+      this.oppGone = true;
+      if (this.wantRematch) { this.leave(true); return; }
+      toast(this, 'Tu rival se fue', 790, C.enemy);
+      this.again.restyle('NUEVO RIVAL', BTN.green);
+    };
+    socket.on('rematchUnavailable', gone);
+    socket.on('opponentLeft', gone);
+  }
+
+  onRematch() {
+    if (this.oppGone || !socket || !socket.connected) { this.leave(true); return; }
+    if (this.wantRematch) return;
+    this.wantRematch = true;
+    Sfx.play('select');
+    this.againPulse.pause();
+    this.again.setScale(1);
+    this.again.restyle('ESPERANDO…', BTN.purple);
+    socket.emit('rematch');
+  }
+
+  leave(autoStart) {
+    if (socket) socket.disconnect();
+    socket = null;
+    roomId = null;
+    CG.leftRoom();
+    this.scene.start('Menu', { autoStart, lastVsBot: !!this.data2.vsBot });
   }
 
   update(time, delta) {
@@ -2171,12 +2394,12 @@ class GameOverScene extends Phaser.Scene {
 
   share(result, oppName) {
     track('share_click', { result });
-    const url = location.origin;
+    const url = CG.inviteLink({ ref: 'share' }) || location.origin;
     const text = result === 'win'
       ? `¡Le gané a ${oppName} en RPS Battle! ⚔️ ¿Te atreves a retarme?`
       : '¡Juega RPS Battle conmigo! Craftea piedra, papel o tijera y lánzaselos a tu rival ⚔️';
     Sfx.play('tap');
-    if (navigator.share) {
+    if (navigator.share && !CG.enabled) {
       navigator.share({ title: 'RPS Battle', text, url }).catch(() => { /* cancelled */ });
     } else if (navigator.clipboard) {
       navigator.clipboard.writeText(`${text} ${url}`)
@@ -2221,7 +2444,16 @@ window.addEventListener('load', () => {
         document.fonts.load('900 16px "Nunito"'),
       ])
     : Promise.resolve();
-  Promise.race([fonts, new Promise(r => setTimeout(r, 2500))])
-    .catch(() => {})
-    .then(() => new Phaser.Game(config));
+  const timeout = ms => new Promise(r => setTimeout(r, ms));
+  Promise.all([
+    Promise.race([fonts, timeout(2500)]).catch(() => {}),
+    Promise.race([CG.init(), timeout(4000)]).catch(() => {}),
+  ]).then(() => {
+    const params = new URLSearchParams(location.search);
+    pendingInvite = CG.inviteParam('room') || params.get('room');
+    if (params.has('room')) {
+      try { history.replaceState(null, '', location.pathname); } catch (e) { /* sandboxed */ }
+    }
+    phaserGame = new Phaser.Game(config);
+  });
 });

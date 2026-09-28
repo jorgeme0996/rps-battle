@@ -38,6 +38,24 @@ app.get('/admin/stats', (req, res) => {
 // ── State ──────────────────────────────────────────────────────────────────
 const waitingQueue = []; // sockets waiting for a match
 const rooms = {};        // roomId → RoomState
+const privateRooms = {}; // invite code → host socket waiting for a friend
+
+function newCode() {
+  const A = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  let code;
+  do {
+    code = Array.from({ length: 5 }, () => A[Math.floor(Math.random() * A.length)]).join('');
+  } while (privateRooms[code]);
+  return code;
+}
+
+function identify(socket, { playerName, playerId } = {}) {
+  socket.playerName = String(playerName || 'Jugador').slice(0, 16);
+  socket.playerId = typeof playerId === 'string' && playerId ? playerId.slice(0, 64) : socket.id;
+  socket.queuedAt = Date.now();
+}
+
+const isBusy = socket => !!(socket.roomId || socket.privateCode || waitingQueue.includes(socket));
 
 function makeRoom(p1, p2) {
   const roomId = `room_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -45,6 +63,7 @@ function makeRoom(p1, p2) {
     players: { [p1.id]: p1, [p2.id]: p2 },
     hp: { [p1.id]: 100, [p2.id]: 100 },
     launches: { [p1.id]: 0, [p2.id]: 0 },
+    rematch: new Set(),
     vsBot: !!(p1.isBot || p2.isBot),
     started: false,
     ended: false,
@@ -162,7 +181,27 @@ function startMatch(p1, p2) {
     if (!p.isBot) analytics.track('match_start', p.playerId, { vsBot: room.vsBot, waitMs: Date.now() - p.queuedAt });
   });
 
-  // 3-second countdown then start
+  beginCountdown(roomId);
+}
+
+// Same pair plays again (rooms are kept across rounds)
+function resetRoom(room) {
+  Object.keys(room.players).forEach(id => {
+    room.hp[id] = 100;
+    room.launches[id] = 0;
+  });
+  clearInterval(room.timer);
+  room.rematch = new Set();
+  room.ended = false;
+  room.started = false;
+  room.startedAt = null;
+  room.stopBot = null;
+  room.timeLeft = 180;
+}
+
+// 3-second countdown then start
+function beginCountdown(roomId) {
+  const room = rooms[roomId];
   let count = 3;
   const cd = setInterval(() => {
     if (rooms[roomId] !== room) { clearInterval(cd); return; }
@@ -172,7 +211,7 @@ function startMatch(p1, p2) {
       clearInterval(cd);
       io.to(roomId).emit('gameStart', { timeLeft: 180 });
       startCountdown(roomId);
-      const bot = [p1, p2].find(p => p.isBot);
+      const bot = Object.values(room.players).find(p => p.isBot);
       if (bot) startBot(roomId, bot);
     }
   }, 1000);
@@ -183,11 +222,10 @@ io.on('connection', (socket) => {
   console.log(`[+] ${socket.id} connected`);
 
   // ── Join / Matchmaking ─────────────────────────────────────────────────
-  socket.on('join', ({ playerName, playerId, source, lastVsBot } = {}) => {
-    if (waitingQueue.includes(socket) || socket.roomId) return;
-    socket.playerName = String(playerName || 'Jugador').slice(0, 16);
-    socket.playerId = typeof playerId === 'string' && playerId ? playerId.slice(0, 64) : socket.id;
-    socket.queuedAt = Date.now();
+  socket.on('join', (info = {}) => {
+    if (isBusy(socket)) return;
+    identify(socket, info);
+    const { source, lastVsBot } = info;
     const isRematch = source === 'rematch';
     analytics.track('queue_join', socket.playerId, { source: isRematch ? 'rematch' : 'menu' });
 
@@ -211,6 +249,56 @@ io.on('connection', (socket) => {
       waitingQueue.splice(qi, 1);
       startMatch(socket, createBot());
     }, botInMs);
+  });
+
+  // ── Private rooms (play with a friend via invite link) ─────────────────
+  socket.on('createPrivate', (info = {}) => {
+    if (isBusy(socket)) return;
+    identify(socket, info);
+    const code = newCode();
+    privateRooms[code] = socket;
+    socket.privateCode = code;
+    analytics.track('queue_join', socket.playerId, { source: 'private' });
+    socket.emit('privateCreated', { code });
+  });
+
+  socket.on('joinPrivate', (info = {}) => {
+    if (isBusy(socket)) return;
+    identify(socket, info);
+    const code = String(info.code || '').toUpperCase().slice(0, 8);
+    const host = privateRooms[code];
+    if (!host || !host.connected || host === socket) {
+      socket.emit('privateNotFound');
+      return;
+    }
+    delete privateRooms[code];
+    host.privateCode = null;
+    analytics.track('queue_join', socket.playerId, { source: 'invite' });
+    startMatch(host, socket);
+  });
+
+  // ── Rematch with the same opponent ─────────────────────────────────────
+  socket.on('rematch', () => {
+    const entry = getRoomOf(socket.id);
+    if (!entry) { socket.emit('rematchUnavailable'); return; }
+    const [roomId, room] = entry;
+    if (!room.ended) return;
+    const oppId = getOpponent(room, socket.id);
+    const opp = room.players[oppId];
+    if (!opp || !opp.connected) { socket.emit('rematchUnavailable'); return; }
+
+    room.rematch.add(socket.id);
+    if (opp.isBot) room.rematch.add(oppId);
+    if (room.rematch.size < 2) {
+      opp.emit('rematchRequested');
+      return;
+    }
+    resetRoom(room);
+    Object.values(room.players).forEach(p => {
+      if (!p.isBot) analytics.track('rematch_start', p.playerId, { vsBot: room.vsBot });
+    });
+    io.to(roomId).emit('rematchStart');
+    beginCountdown(roomId);
   });
 
   // ── Game Events ────────────────────────────────────────────────────────
@@ -246,6 +334,11 @@ io.on('connection', (socket) => {
     console.log(`[-] ${socket.id} disconnected`);
     clearTimeout(socket.botTimer);
 
+    if (socket.privateCode) {
+      delete privateRooms[socket.privateCode];
+      analytics.track('queue_leave', socket.playerId, { waitMs: Date.now() - socket.queuedAt, reason, private: true });
+    }
+
     // Remove from queue
     const qi = waitingQueue.indexOf(socket);
     if (qi !== -1) {
@@ -263,6 +356,8 @@ io.on('connection', (socket) => {
         if (room.stopBot) room.stopBot();
         socket.to(roomId).emit('opponentDisconnected');
         trackMatchEnd(room, 'disconnect', id => (id === socket.id ? 'quit' : 'win'));
+      } else {
+        socket.to(roomId).emit('opponentLeft'); // no rematch possible anymore
       }
       delete rooms[roomId];
     }

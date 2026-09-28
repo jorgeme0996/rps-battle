@@ -20,7 +20,7 @@ function bucket() {
   if (!days[d]) {
     days[d] = {
       players: new Set(), appOpens: 0, installedOpens: 0, tutorialOpens: 0, shares: 0,
-      queueJoins: 0, rematches: 0, queueLeaves: 0, waitMs: 0, waits: 0,
+      queueJoins: 0, rematches: 0, privateJoins: 0, queueLeaves: 0, waitMs: 0, waits: 0,
       pvpPlayers: 0, botPlayers: 0, finished: 0, durationMs: 0, launches: 0, quits: 0,
       botWins: 0, botLosses: 0, botDraws: 0,
     };
@@ -36,7 +36,12 @@ function aggregate(event, playerId, p) {
     case 'app_open':      b.appOpens++; if (p.standalone) b.installedOpens++; break;
     case 'tutorial_open': b.tutorialOpens++; break;
     case 'share_click':   b.shares++; break;
-    case 'queue_join':    b.queueJoins++; if (p.source === 'rematch') b.rematches++; break;
+    case 'queue_join':
+      b.queueJoins++;
+      if (p.source === 'rematch') b.rematches++;
+      if (p.source === 'private' || p.source === 'invite') b.privateJoins++;
+      break;
+    case 'rematch_start': b.rematches++; break;
     case 'queue_leave':   b.queueLeaves++; break;
     case 'match_start':
       b.waitMs += p.waitMs || 0; b.waits++;
@@ -93,6 +98,7 @@ function renderStats(live) {
     ['Espera promedio', b => avg(b.waitMs / 1000, b.waits, ' s')],
     ['Partidas PvP', b => b.pvpPlayers / 2],
     ['Partidas vs bot', b => b.botPlayers],
+    ['Salas privadas (crear + unirse)', b => b.privateJoins],
     ['Duración promedio', b => avg(b.durationMs / 1000, b.finished, ' s')],
     ['Lanzamientos por jugador', b => avg(b.launches, b.finished)],
     ['Abandonos en partida', b => `${b.quits} (${pct(b.quits, b.finished)})`],
