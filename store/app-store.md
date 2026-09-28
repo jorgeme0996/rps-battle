@@ -13,7 +13,7 @@ Los límites de caracteres de Apple van entre paréntesis.
 - **Categoría secundaria**: Juegos → **Casual**
 - **URL de la política de privacidad**: `https://rps-battle-production-7f46.up.railway.app/privacy.html`
 - **URL de soporte**: `https://rps-battle-production-7f46.up.railway.app/support.html`
-- **Copyright**: `2026 <tu nombre o empresa>`
+- **Copyright**: `2026 Jorge de Jesús Martinez Espino`
 
 ## Texto promocional (170)
 
@@ -82,5 +82,5 @@ Game Center is used only to show the player's alias; if the player is not signed
 ## Pendientes
 
 - [ ] Capturas de pantalla de iPhone 6.9" (1320×2868)
-- [ ] Reemplazar `CONTACT_EMAIL` en `public/privacy.html` y `public/support.html`
+- [x] Correo de contacto en privacidad y soporte
 - [ ] Activar Game Center para la app en App Store Connect
