@@ -1,0 +1,9 @@
+ios/App/CapApp-SPM/Package.swift
+  ai_agent 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "8ae1de6e0e1ba0ffb88c79c46408263f6b906e5a",
+  "prompts": {}
+}
