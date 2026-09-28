@@ -81,6 +81,6 @@ Game Center is used only to show the player's alias; if the player is not signed
 
 ## Pendientes
 
-- [ ] Capturas de pantalla de iPhone 6.9" (1320×2868)
+- [x] Capturas de pantalla de iPhone 6.9" (1320×2868) → `dist/app-store-screenshots/`, en este orden: 01 a 06
 - [x] Correo de contacto en privacidad y soporte
 - [ ] Activar Game Center para la app en App Store Connect
